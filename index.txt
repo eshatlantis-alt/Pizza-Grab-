@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Catch the Pizza!</title>
+<style>
+  :root{
+    --tomato:#d62f2f; --basil:#1f4d3a; --butter:#ffd36b; --paper:#fff8ec; --ink:#2a1a14;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%;background:var(--basil);color:var(--ink);font-family:"Trebuchet MS","Segoe UI",system-ui,sans-serif;overflow:hidden;touch-action:none}
+  #app{position:relative;height:100%;max-width:520px;margin:0 auto;background:var(--paper)}
+  canvas{display:block;width:100%;height:100%}
+  .hud{position:absolute;top:0;left:0;right:0;display:flex;justify-content:space-between;align-items:center;padding:10px 14px;padding-top:calc(10px + env(safe-area-inset-top,0px));font-weight:700;font-size:20px;pointer-events:none}
+  .bar{position:absolute;left:14px;right:14px;top:calc(46px + env(safe-area-inset-top,0px));height:10px;background:#0002;border-radius:6px;overflow:hidden;pointer-events:none}
+  .bar i{display:block;height:100%;width:0;background:var(--tomato);transition:width .2s}
+  .screen{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:28px;background:var(--basil);color:var(--paper);gap:14px}
+  .screen.show{display:flex}
+  h1{font-size:34px;line-height:1.1}
+  p{font-size:17px;line-height:1.4;max-width:30ch}
+  .big{font-size:64px}
+  button{font:inherit;font-weight:700;font-size:20px;padding:14px 34px;border:0;border-radius:999px;background:var(--butter);color:var(--ink);cursor:pointer}
+  button:active{transform:scale(.97)}
+  button:focus-visible{outline:3px solid #fff;outline-offset:3px}
+  .ticket{background:var(--paper);color:var(--ink);border:3px dashed var(--tomato);border-radius:14px;padding:16px 22px;max-width:300px}
+  .ticket b{display:block;font-size:26px;color:var(--tomato);margin:4px 0}
+  .ticket small{display:block;font-size:14px;opacity:.8}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<div id="app">
+  <canvas id="c"></canvas>
+  <div class="hud"><span id="score">0</span><span id="lives">❤️❤️❤️</span></div>
+  <div class="bar"><i id="fill"></i></div>
+
+  <div class="screen show" id="start">
+    <div class="big">🍕</div>
+    <h1 id="title">Catch the Pizza!</h1>
+    <p id="intro"></p>
+    <button id="playBtn">Play</button>
+  </div>
+
+  <div class="screen" id="lose">
+    <div class="big">😅</div>
+    <h1>So close!</h1>
+    <p id="loseMsg"></p>
+    <button id="againBtn">Try again</button>
+  </div>
+
+  <div class="screen" id="win">
+    <div class="big">🎉</div>
+    <h1>You won!</h1>
+    <div class="ticket">
+      <small id="wTable"></small>
+      <b id="wPrize"></b>
+      <small id="wTime"></small>
+      <small id="wCode"></small>
+    </div>
+    <p>Show this screen to your waiter to claim your reward.</p>
+  </div>
+</div>
+
+<script>
+/* ============ EDIT THESE SETTINGS ============ */
+const CONFIG = {
+  restaurant: "Street Pizza",
+  targetScore: 100,          // points needed to win
+  lives: 3,                  // bad items that can hit the plate before game over
+  rewards: ["Free Soft Drink", "Free Slice of Pizza", "10 pieces of fries"],  // one is picked at random
+  staffWord: "RAMSAY",        // staff can change this daily, it shows on the winning ticket
+  oneWinPerDevice: true      // stops the same phone winning again on the same day
+};
+/* ============================================== */
+
+const $ = id => document.getElementById(id);
+const canvas = $("c"), ctx = canvas.getContext("2d");
+const GOOD = ["🍕","🍕","🍕","🍔","🍟","🌮","🍩"];
+const BAD  = ["🧦","🥾","🪨","🌶️"];
+let W, H, plate, items, score, lives, running, last, spawnT, speedMul;
+
+const params = new URLSearchParams(location.search);
+const table = params.get("table");
+const today = new Date().toISOString().slice(0,10);
+const winKey = "won_" + today;
+
+$("title").textContent = CONFIG.restaurant;
+$("intro").textContent = `Move the plate to catch food. Avoid socks, boots and rocks! Reach ${CONFIG.targetScore} points to win a prize.`;
+
+function resize(){
+  const dpr = window.devicePixelRatio || 1;
+  W = canvas.clientWidth; H = canvas.clientHeight;
+  canvas.width = W*dpr; canvas.height = H*dpr;
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  if(plate){ plate.y = H - 90; plate.x = Math.min(Math.max(plate.x, plate.w/2), W - plate.w/2); }
+}
+window.addEventListener("resize", resize);
+
+function reset(){
+  resize();
+  plate = {x:W/2, y:H-90, w:96, h:20};
+  items = []; score = 0; lives = CONFIG.lives; spawnT = 0; speedMul = 1;
+  updateHud();
+}
+
+function updateHud(){
+  $("score").textContent = score + " pts";
+  $("lives").textContent = "❤️".repeat(Math.max(lives,0)) + "🖤".repeat(CONFIG.lives - Math.max(lives,0));
+  $("fill").style.width = Math.min(100, score / CONFIG.targetScore * 100) + "%";
+}
+
+function show(id){ document.querySelectorAll(".screen").forEach(s => s.classList.remove("show")); if(id) $(id).classList.add("show"); }
+
+function start(){
+  if(CONFIG.oneWinPerDevice && safeGet(winKey)){ showWin(true); return; }
+  reset(); show(null); running = true; last = performance.now(); requestAnimationFrame(loop);
+}
+
+function spawn(){
+  const bad = Math.random() < 0.28;
+  const list = bad ? BAD : GOOD;
+  items.push({
+    e: list[Math.floor(Math.random()*list.length)], bad,
+    x: 24 + Math.random()*(W-48), y: -30,
+    v: (110 + Math.random()*70) * speedMul, size: 36
+  });
+}
+
+function loop(t){
+  if(!running) return;
+  const dt = Math.min((t-last)/1000, 0.05); last = t;
+  spawnT -= dt;
+  if(spawnT <= 0){ spawn(); spawnT = Math.max(0.35, 0.85 - score/300); }
+  speedMul = 1 + score/120;
+
+  for(const it of items){
+    it.y += it.v*dt;
+    const hit = it.y > plate.y - 18 && it.y < plate.y + 20 && Math.abs(it.x - plate.x) < plate.w/2 + 10;
+    if(hit){
+      it.gone = true;
+      if(it.bad){ lives--; if(navigator.vibrate) navigator.vibrate(80); }
+      else score += 10;
+      updateHud();
+    } else if(it.y > H + 30){ it.gone = true; }
+  }
+  items = items.filter(i => !i.gone);
+
+  draw();
+
+  if(score >= CONFIG.targetScore){ running = false; return showWin(); }
+  if(lives <= 0){ running = false; return showLose(); }
+  requestAnimationFrame(loop);
+}
+
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  // checkered tablecloth
+  const s = 40;
+  for(let y=0;y<H;y+=s) for(let x=0;x<W;x+=s){
+    ctx.fillStyle = ((x/s + y/s) % 2 === 0) ? "#fff8ec" : "#fbe4dc";
+    ctx.fillRect(x,y,s,s);
+  }
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  for(const it of items){ ctx.font = it.size + "px serif"; ctx.fillText(it.e, it.x, it.y); }
+  // plate
+  ctx.fillStyle = "#2a1a14"; ctx.beginPath(); ctx.ellipse(plate.x, plate.y+8, plate.w/2, 12, 0, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = "#ffffff"; ctx.beginPath(); ctx.ellipse(plate.x, plate.y+4, plate.w/2, 12, 0, 0, Math.PI*2); ctx.fill();
+  ctx.strokeStyle = "#d62f2f"; ctx.lineWidth = 3; ctx.beginPath(); ctx.ellipse(plate.x, plate.y+4, plate.w/2-8, 7, 0, 0, Math.PI*2); ctx.stroke();
+}
+
+function showLose(){
+  $("loseMsg").textContent = `You scored ${score}. You need ${CONFIG.targetScore} to win a prize.`;
+  show("lose");
+}
+
+function showWin(already){
+  const prize = safeGet("prize_" + today) || CONFIG.rewards[Math.floor(Math.random()*CONFIG.rewards.length)];
+  safeSet(winKey, "1"); safeSet("prize_" + today, prize);
+  $("wTable").textContent = (table ? "Table " + table + " · " : "") + CONFIG.restaurant;
+  $("wPrize").textContent = prize;
+  $("wCode").textContent = "Code: " + CONFIG.staffWord;
+  tick(); clearInterval(window._t); window._t = setInterval(tick, 1000);
+  show("win");
+}
+function tick(){ $("wTime").textContent = new Date().toLocaleString(); }
+
+function safeGet(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } }
+function safeSet(k,v){ try{ localStorage.setItem(k,v); }catch(e){} }
+
+/* controls: drag finger / mouse, or arrow keys */
+function moveTo(clientX){
+  if(!plate) return;
+  const r = canvas.getBoundingClientRect();
+  plate.x = Math.min(Math.max(clientX - r.left, plate.w/2), W - plate.w/2);
+}
+canvas.addEventListener("pointermove", e => moveTo(e.clientX));
+canvas.addEventListener("pointerdown", e => moveTo(e.clientX));
+window.addEventListener("keydown", e => {
+  if(!plate) return;
+  if(e.key === "ArrowLeft") moveTo(plate.x - 30 + canvas.getBoundingClientRect().left);
+  if(e.key === "ArrowRight") moveTo(plate.x + 30 + canvas.getBoundingClientRect().left);
+});
+
+$("playBtn").onclick = start;
+$("againBtn").onclick = start;
+resize();
+</script>
+</body>
+</html>
